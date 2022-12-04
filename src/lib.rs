@@ -97,10 +97,10 @@ macro_rules! call_vpx {
         let result_int = unsafe { std::mem::transmute::<_, i32>(result) };
         // if result != VPX_CODEC_OK {
         if result_int != 0 {
-            return Err(Error::from(format!(
-                "Function call failed (error code {}).",
-                result_int
-            )));
+            let code = unsafe { std::ffi::CStr::from_ptr(vpx_codec_err_to_string(result)) };
+            let code = code.to_str().unwrap();
+
+            return Err(Error::from(format!("VPX function call failed ({code}).")));
         }
         result
     }};
@@ -188,8 +188,8 @@ impl Encoder {
         })
     }
 
-    pub fn encode(&mut self, pts: i64, data: &[u8]) -> Result<Packets> {
-        assert!(2 * data.len() >= 3 * self.width * self.height);
+    pub fn encode(&mut self, pts: i64, data: &[u8], force_keyframe: bool) -> Result<Packets> {
+        // assert!(2 * data.len() >= 3 * self.width * self.height);
 
         let image = MaybeUninit::zeroed();
         let mut image = unsafe { image.assume_init() };
@@ -197,18 +197,27 @@ impl Encoder {
         call_vpx_ptr!(vpx_img_wrap(
             &mut image,
             vpx_img_fmt::VPX_IMG_FMT_I420,
+            // vpx_img_fmt::VPX_IMG_FMT_NV12,
             self.width as _,
             self.height as _,
             1,
             data.as_ptr() as _,
         ));
 
+        let flags = if force_keyframe {
+            VPX_EFLAG_FORCE_KF
+        } else {
+            0
+        };
+
+        // println!("vpx_image {:#?}", image);
+
         call_vpx!(vpx_codec_encode(
             &mut self.ctx,
             &image,
             pts,
-            1, // Duration
-            0, // Flags
+            33, // Duration
+            flags as i64,
             vpx_sys::VPX_DL_REALTIME as c_ulong,
         ));
 
@@ -232,6 +241,44 @@ impl Encoder {
             enc: self,
             iter: ptr::null(),
         })
+    }
+
+    pub fn wrap_image(&self, data: &[u8], width: u32, height: u32) -> Result<ImageWrap> {
+        let image = MaybeUninit::zeroed();
+        let mut image = unsafe { image.assume_init() };
+
+        call_vpx_ptr!(vpx_img_wrap(
+            &mut image,
+            vpx_img_fmt::VPX_IMG_FMT_I420,
+            width,
+            height,
+            1,
+            data.as_ptr() as _,
+        ));
+
+        Ok(ImageWrap(image))
+    }
+}
+
+pub struct ImageWrap(vpx_image);
+
+impl ImageWrap {
+    pub fn schmoo(&mut self) {
+        println!("vpx_image planes {:?}", self.0.planes);
+        println!("          stride {:?}", self.0.stride);
+    }
+
+    pub fn get_planes(&self) -> ([*mut u8; 4], [i32; 4], [u32; 4], [u32; 4]) {
+        let vpx_image {
+            planes,
+            stride,
+            w,
+            h,
+            ..
+        } = self.0;
+        let w2 = w / 2;
+        let h2 = h / 2;
+        (planes, stride, [w, w2, w2, w2], [h, h2, h2, h2])
     }
 }
 
